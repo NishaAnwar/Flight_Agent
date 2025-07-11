@@ -30,7 +30,15 @@ You are a smart flight assistant. Extract only flight booking information. Follo
    [{{"Type": "adult", "Count": N}}, ...]
 
 5. If the user **specifies a travel company/airline**, it will be mentioned in your structured result **under a key called `airline_detected`**.
-
+6. If the user misspells a city name (e.g., "Krachi", "Lahor", "Islamabd"), correct it to the closest known city name like:
+   - "Karachi"
+   - "Lahore"
+   - "Islamabad"
+   - "Faisalabad"
+   - "Multan"
+   - "Quetta"
+   - "Peshawar"
+   
 Return ONLY this JSON:
 {{
   "source": "",
@@ -87,13 +95,13 @@ Query:
 
         # Ask for missing values via input()
         if not data.get("source"):
-            data["source"] = input("Please enter your departure city: ").strip()
+            data["source"] = input("🛫 Please enter your departure city: ").strip()
 
         if not data.get("destination"):
-            data["destination"] = input("Please enter your destination city: ").strip()
+            data["destination"] = input("🏙️ Please enter your destination city: ").strip()
 
         if not data.get("date"):
-            date_input = input("Please enter your travel date (YYYY-MM-DD or 12 July): ").strip()
+            date_input = input("📅 Please enter your travel date (YYYY-MM-DD or 12 July): ").strip()
             try:
                 if re.match(r"^\d{1,2}(st|nd|rd|th)?\s+\w+", date_input, re.IGNORECASE):
                     parsed_date = datetime.strptime(date_input, "%d %B")
