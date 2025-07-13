@@ -1,154 +1,173 @@
 import json
 import requests
 from datetime import datetime
+from IATA_Code import CITY_TO_IATA, get_airline_code
 
-CITY_TO_IATA = {
-    "islamabad": "ISB",
-    "karachi": "KHI",
-    "lahore": "LHE",
-    "peshawar": "PEW",
-    "quetta": "UET",
-    "multan": "MUX",
-    "faisalabad": "LYP",
-    "sialkot": "SKT",
-    "skardu": "KDU",
-    "gilgit": "GIL",
-    "chitral": "CJL",
-    "sukkur": "SKZ",
-    "rahim_yar_khan": "RYK",
-    "gwadar": "GWD",
-    "turbat": "TUK",
-    "panjgur": "PJG",
-    "pasni": "PSI",
-    "jiwani": "JIW",
-    "dalbandin": "DBA",
-    "khuzdar": "KDD",
-    "nawabshah": "WNS",
-    "jacobabad": "JAG",
-    "dera_ghazi_khan": "DEA",
-    "dera_ismail_khan": "DSK",
-    "parachinar": "PAJ",
-    "zhob": "PZH",
-    "muzaffarabad": "MFG",
-    "saidu_sharif": "SDT",
-    "mohenjodaro": "MJD",
-    "mianwali": "MWD",
-    "sibi": "SBQ",
-    "sui": "SUL",
-    "ormara": "ORW",
-    "kohat": "OHT"
-}
+
+def city_to_iata(city_name):
+    return CITY_TO_IATA.get(city_name.lower().replace(" ", "_"))
 
 
 def search_flights(input_dict):
-    # 👇 FIX: Parse JSON string to dictionary
     if isinstance(input_dict, str):
         input_dict = json.loads(input_dict)
 
     token = input_dict.get("token")
-    # ✅ Handle both possible structures
-    if "data" in input_dict:
-        flight_data = input_dict["data"]
+    airline = get_airline_code(input_dict.get("airline_detected", ""))
+    flight_data = input_dict.get("data", input_dict)
+    # Patch if departure_date and return_date are at the top-level (like tool input)
+    if "departure_date" in input_dict:
+        flight_data["departure_date"] = input_dict["departure_date"]
+    if "return_date" in input_dict:
+        flight_data["return_date"] = input_dict["return_date"]
+
+    travel_class = flight_data.get("TravelClass", "economy")
+    trip_type = flight_data.get("TripType", "one_way")
+
+    travelers = flight_data.get("Travelers", [
+        {"Type": "adult", "Count": 1},
+        {"Type": "child", "Count": 0},
+        {"Type": "infant", "Count": 0}
+    ])
+
+    if airline:
+        airlines_to_search = [airline]
     else:
-        flight_data = input_dict
+        airlines_to_search = ["pia", "serene", "airblue", "flyjinnah", "airsial", "amadeus"]
 
-    source = flight_data.get("source", "").strip().lower()
-    destination = flight_data.get("destination", "").strip().lower()
+    found_flight = False
+    results = []
 
-    source_iata = CITY_TO_IATA.get(source)
-    destination_iata = CITY_TO_IATA.get(destination)
+    def format_response(data, provider):
+        nonlocal found_flight
+        output = []
+        if not data.get("Itineraries"):
+            return f"No flights found for {provider.title()}.\n"
+        found_flight = True
+        output.append(f"Available Flights from {provider.title()}:\n")
+        for itinerary in data["Itineraries"]:
+            for flight in itinerary["Flights"]:
+                from_city = flight["From"]["city"]["name"]
+                to_city = flight["To"]["city"]["name"]
+                dep = flight["DepartureAt"]
+                arr = flight["ArrivalAt"]
+                airline_name = flight["MarketingCarrier"]["name"]
 
-    if not source_iata or not destination_iata:
-        return f"Missing IATA code for source or destination: {source} → {source_iata}, {destination} → {destination_iata}"
+                try:
+                    dep_fmt = datetime.fromisoformat(dep).strftime("%I:%M %p, %d %b %Y")
+                    arr_fmt = datetime.fromisoformat(arr).strftime("%I:%M %p, %d %b %Y")
+                except:
+                    dep_fmt, arr_fmt = dep, arr
 
-    # Validate and parse date
-    date_str = flight_data.get("date", "")
-    try:
-        travel_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        if travel_date < datetime.today().date():
-            return "Error: Travel date must be today or in the future."
-    except ValueError:
-        return "Error: Invalid date format. Expected YYYY-MM-DD."
+                output.append(f"🛫 {airline_name} flight from {from_city} to {to_city}")
+                output.append(f"   Departure: {dep_fmt} | Arrival: {arr_fmt}")
 
-    # Normalize travelers
-    travelers_input = flight_data.get("Travelers", [])
-    if travelers_input and isinstance(travelers_input[0], dict):
-        t = travelers_input[0]
-        travelers = [
-            {"Type": "adult", "Count": t.get("adult", t.get("adults", 1))},
-            {"Type": "child", "Count": t.get("child", t.get("children", 0))},
-            {"Type": "infant", "Count": t.get("infant", t.get("infants", 0))}
-        ]
-    else:
-        travelers = [
-            {"Type": "adult", "Count": 1},
-            {"Type": "child", "Count": 0},
-            {"Type": "infant", "Count": 0}
-        ]
+                for fare in flight.get("Fares", []):
+                    output.append(f"   Fare: {fare['Name'].upper()} - PKR {fare['ChargedTotalPrice']}")
 
-    payload = {
-        "Locations": [
-            {"IATA": source_iata, "Type": "airport"},
-            {"IATA": destination_iata, "Type": "airport"}
-        ],
-        "ContentProvider": "PIA",
-        "Currency": "PKR",
-        "TravelClass": flight_data.get("TravelClass", "economy"),
-        "TripType": flight_data.get("TripType", "one_way"),
-        "TravelingDates": [date_str],
-        "Travelers": travelers
-    }
+                pax_summary = ", ".join(f"{t['Count']} {t['Type']}(s)" for t in travelers if t['Count'] > 0)
+                #output.append(f" Passengers: {pax_summary}\n")
+        return "\n".join(output)
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-    }
+    for provider in airlines_to_search:
+        payload = {}
+        if trip_type == "one_way":
+            source_iata = city_to_iata(flight_data.get("source", ""))
+            destination_iata = city_to_iata(flight_data.get("destination", ""))
+            date_str = flight_data.get("date", "")
 
-    url = "https://bookmesky.com/air/api/search"
-    response = requests.post(url, headers=headers, json=payload)
+            if not source_iata or not destination_iata:
+                continue
 
-    if response.status_code != 200:
-        return f"Flight search failed. Status: {response.status_code}\n{response.text}"
+            payload = {
+                "Locations": [{"IATA": source_iata, "Type": "airport"}, {"IATA": destination_iata, "Type": "airport"}],
+                "ContentProvider": provider,
+                "Currency": "PKR",
+                "TravelClass": travel_class,
+                "TripType": "one_way",
+                "TravelingDates": [date_str],
+                "Travelers": travelers
+            }
 
-    data = response.json()
-    if not data.get("Itineraries"):
-        return "No flights found for the selected route and date."
 
-    results = ["✅ Available Flights:\n"]
-    for itinerary in data["Itineraries"]:
-        for flight in itinerary["Flights"]:
-            from_city = flight["From"]["city"]["name"]
-            to_city = flight["To"]["city"]["name"]
-            departure = flight["DepartureAt"]
-            arrival = flight["ArrivalAt"]
-            airline = flight["MarketingCarrier"]["name"]
+        elif trip_type in ["round_trip", "return"]:
 
-            # Convert ISO datetime strings to readable format
-            try:
-                departure_time = datetime.fromisoformat(departure).strftime("%I:%M %p, %d %b %Y")
-                arrival_time = datetime.fromisoformat(arrival).strftime("%I:%M %p, %d %b %Y")
-            except ValueError:
-                departure_time = departure
-                arrival_time = arrival
+            source_iata = city_to_iata(flight_data.get("source", ""))
 
-            results.append(f"🛫 {airline} flight from {from_city} to {to_city}")
-            results.append(f"   Departure: {departure_time} | Arrival: {arrival_time}")
+            destination_iata = city_to_iata(flight_data.get("destination", ""))
 
-            for fare in flight.get("Fares", []):
-                name = fare["Name"]
-                price = fare["ChargedTotalPrice"]
-                results.append(f"   Fare: {name.upper()} - PKR {price}")
+            dep_date = flight_data.get("departure_date", "")
 
-            # Add passengers info
-            passenger_info = []
-            for t in flight_data.get("Travelers", []):
-                count = t.get("Count", 0)
-                t_type = t.get("Type", "")
-                if count > 0:
-                    passenger_info.append(f"{count} {t_type}(s)")
-            results.append(f"👤 Passengers: {','.join(passenger_info)}")
+            ret_date = flight_data.get("return_date", "")
 
-            results.append("")
+            if not all([source_iata, destination_iata, dep_date, ret_date]):
+                continue
 
-    return "\n".join(results)
+            payload = {
+
+                "Locations": [
+
+                    {"IATA": source_iata, "Type": "airport"},
+
+                    {"IATA": destination_iata, "Type": "airport"}
+
+                ],
+                "ContentProvider": provider,
+                "Currency": "PKR",
+                "TravelClass": travel_class,
+                "TripType": "return",
+                "TravelingDates": [dep_date, ret_date],
+                "Travelers": travelers
+            }
+
+
+        elif trip_type == "multi_city":
+
+            locations = flight_data.get("Locations", [])
+
+            dates = flight_data.get("TravelingDates", [])
+
+            # Validate multi-city requirements
+
+            if len(locations) < 4 or len(dates) < 2:  # Need at least 4 locations (2x source/dest) and 2 dates
+
+                continue
+
+            payload = {
+
+                "Locations": locations,
+
+                "ContentProvider": provider,
+
+                "Currency": "PKR",
+
+                "TravelClass": travel_class,
+
+                "TripType": "multi_city",
+
+                "TravelingDates": dates,
+
+                "Travelers": travelers
+
+            }
+
+        else:
+            continue  # Unsupported trip type
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+
+        try:
+            response = requests.post("https://bookmesky.com/air/api/search", headers=headers, json=payload)
+            if response.status_code != 200:
+                results.append(f"Failed to fetch flights from {provider.title()} (Status {response.status_code})\n")
+                continue
+            data = response.json()
+            results.append(format_response(data, provider))
+        except Exception as e:
+            results.append(f"Error while connecting to {provider.title()}: {str(e)}")
+
+    return "\n".join(results) if found_flight else "No flights available for the given route and date."
