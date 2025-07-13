@@ -8,6 +8,12 @@ from Data_Extraction_tool import extract_flight_details
 from Authentication_Tool import authenticate
 from Flight_Searching_Tool import search_flights
 import json
+import warnings
+import logging
+
+warnings.filterwarnings("ignore")  # Suppress warnings
+logging.getLogger().setLevel(logging.CRITICAL)  # Suppress logs globally
+
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
@@ -21,9 +27,10 @@ llm = ChatGoogleGenerativeAI(
 )
 
 tools = [
-    Tool(name="extract_details", func=extract_flight_details,  description="Use this tool to analyze any user message and extract flight details. Must be called first before any reasoning. Always return its output directly if it provides a message key."),
+    Tool(name="extract_details", func=extract_flight_details,  description="First tool for ANY user query. Extracts flight details OR returnsspecial responses for non-flight/abusive queries. ALWAYS return its output directly if it contains 'message' key."),
     Tool(name="auth", func=authenticate, description="Generates Bearer token for Bookme."),
     Tool(name="search", func=search_flights, description="Searches flights using token and extracted data.", return_direct=True)
+
 ]
 
 agent = initialize_agent(
@@ -35,56 +42,42 @@ agent = initialize_agent(
 
 if __name__ == "__main__":
 
+    def re_ask_full_prompt_if_required(data: dict) -> dict:
+        """If essential info is missing, notify and exit the program."""
+        missing = []
+        if not data.get("source"):
+            missing.append("source")
+        if not data.get("destination"):
+            missing.append("destination")
+        if not data.get("date"):
+            missing.append("date")
 
-    def ask_user_to_fill_missing_fields(partial_data: dict) -> dict:
-        """Interactively ask user to fill missing fields."""
-        required_fields = ["source", "destination", "date"]
+        if missing:
+            print(f" Missing essential details: {', '.join(missing).title()}")
+            print("Please re-run the program and provide the full flight request with all required details.")
+            exit(1)
 
-        for field in required_fields:
-            if not partial_data.get(field):
-                user_input = input(f"❓ Please provide the {field}:\n> ")
+        return data
 
-                # Only use extract_flight_details for date so it gets formatted properly
-                if field == "date":
-                    extracted = json.loads(extract_flight_details(user_input))
-                    if "date" in extracted:
-                        partial_data["date"] = extracted["date"]
-                    else:
-                        print("❌ Could not parse a valid date. Try again.")
-                        return None
-                else:
-                    partial_data[field] = user_input.strip()
-
-        return partial_data
-
-
-    user_input = input("🛫 Enter your flight request:\n> ")
+    user_input = input("Enter your flight request:\n> ")
     response = agent.run(user_input)
 
-    # Try parsing JSON to check for missing fields
     try:
         data = json.loads(response)
 
-        # If it's asking for any missing info
         if "message" in data and "partial_data" in data:
             print("📩", data["message"])
-            partial = data["partial_data"]
+            data = data["partial_data"]
 
-            # Ask for all missing fields (source, destination, date)
-            updated = ask_user_to_fill_missing_fields(partial)
+        #  Check for missing essential details and exit if incomplete
+        data = re_ask_full_prompt_if_required(data)
 
-            if updated is None:
-                print("❌ Failed to update missing fields.")
-                exit(1)
+        # Attach token and proceed
+        token = authenticate("Bookme")
+        data["token"] = token
 
-            # Re-run the agent with complete data
-            print("\n🔁 Reprocessing with all required details...\n")
-            final_response = agent.run(json.dumps(updated))
-            print("\nFinal Result:\n", final_response)
-
-        else:
-            # All fields were complete from the start
-            print("\nFinal Result:\n", response)
+        final_response = search_flights(data)
+        print("\nFinal Result:\n", final_response)
 
     except json.JSONDecodeError:
         print("\nFinal Result:\n", response)
