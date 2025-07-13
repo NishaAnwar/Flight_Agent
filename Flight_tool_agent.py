@@ -37,7 +37,7 @@ agent = initialize_agent(
     tools=tools,
     llm=llm,
     agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-    verbose=True
+    verbose=False
 )
 
 if __name__ == "__main__":
