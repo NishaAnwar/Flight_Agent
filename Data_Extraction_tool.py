@@ -4,84 +4,123 @@ from datetime import datetime
 import google.generativeai as genai
 from Date import resolve_date
 from Default_Values import DEFAULTS
-from IATA_Code import CITY_TO_IATA
+from IATA_Code import CITY_TO_IATA,AIRLINE_NAMES
+
 def today_str():
     return datetime.today().strftime("%Y-%m-%d")
 
+def get_today_day_name():
+    today = datetime.today()
+    return today.strftime("%A")
 
 def city_to_iata(city):
     return CITY_TO_IATA.get(city.strip().lower().replace(" ", "_"))
 
+def validate_airlines(raw_list):
+    if not raw_list:
+        return []
+    valid_airlines = []
+    for name in raw_list:
+        for key, val in AIRLINE_NAMES.items():
+            if name.strip().lower() in [key.lower(), val.lower()]:
+                valid_airlines.append(val)
+    return list(set(valid_airlines))  # Deduplicate
 
 def extract_flight_details(query: str) -> str:
     prompt = f"""
-You are a smart flight assistant. Extract only flight booking information. Follow these rules:
+    You are a smart flight assistant. Extract only flight booking information. Follow these rules:
 
-1. If the query is abusive, return:
-{{"message": "Please be respectful. If you continue this behavior, it reflects very poor manners."}}
+    1. If the query is abusive, return:
+    {{"message": "Please be respectful. If you continue this behavior, it reflects very poor manners."}}
 
-2. If the query is not flight related, return:
-{{"message": "This doesn't seem to be a flight-related query. Please ask something related to flights."}}
+    2. If the query is not flight related, return:
+    {{"message": "This doesn't seem to be a flight-related query. Please ask something related to flights."}}
 
-3. Assume date like "12 July" is for year 2025.
-4. Travelers must be structured as:
-   [{{"Type": "adult", "Count": N}}, ...]
+    3. Handle all date formats carefully:
+       - Assume dates like "12 July" are for the year 2025. If month spellings are incorrect (e.g., "Octovfrt"), correct them before using.
+       - If the user enters natural language expressions such as:
+         - "today", "tomorrow", "next Monday", "this Sunday"
+         - or relative phrases like "2 weeks", "4 months", "2 weeks 3 days", etc.
+         - or weekday names: calculate using function: {get_today_day_name}
+       - Convert them into format: YYYY-MM-DD
+       - Base all calculations on today's date: {today_str()}
+       - If no date is mentioned:
+         - For one_way and multi_city → leave it empty and let the user re-enter the request with a proper date.
+         - For round_trip → If only one date is mentioned, use it for both departure and return. If both dates are missing, leave them empty.
+         - For phrases like  without mentioning the departure date(e.g., I want to return on the same day,return 3 days later,etc ) .leave it empty and let the user re-enter the request with a proper date.
 
-5. Fix misspelled cities like:
-   Karachi, Lahore, Islamabad, Faisalabad, Multan, Quetta, Peshawar
+    4. Travelers must be structured as:
+       [{{"Type": "adult", "Count": N}}, ...]
 
-6. Normalize `TripType` to one of:
-   - one_way (includes 'one way', 'one-way', etc.)
-   - round_trip (includes 'roundtrip', 'return', etc.)
-   - multi_city (includes 'multi-city', 'multi city')
+    5. Fix misspelled cities like:
+       Karachi, Lahore, Islamabad, Faisalabad, Multan, Quetta, Peshawar
 
-7. If `TripType` is multi_city:
-   - Return an array like:
-     "flights": [
-       {{ "source": "City1", "destination": "City2", "date": "14 July" }},
-       ...
-     ]
-   - If less than 2 segments are provided, fallback to one_way.
+    6. Normalize TripType to one of:
+       - one_way (includes 'one way', 'one-way', etc.)
+       - round_trip (includes 'roundtrip', 'return', etc.)
+       - multi_city (includes 'multi-city', 'multi city')
 
-8. If `TripType` is round_trip:
-   - Return:
-     "departure_date": "", "return_date": ""
-   - If dates are missing:
-     - Use today's date
-     - If only one date is mentioned, use it for both
+    7. If TripType is multi_city:
+       - Return an array like:
+         "flights": [
+           {{ "source": "City1", "destination": "City2", "date": "14 July" }},
+           ...
+         ]
+       - If less than 2 segments are provided, fallback to one_way.
+       - If any flight segment is missing a date, leave it empty so the user is prompted again.
 
-9. If no specific airline is mentioned, leave `airline_detected` empty.
+    8. If TripType is round_trip:
+       - Return:
+         "departure_date": "", "return_date": ""
+       - If only one date is given, use it for both.
+       - If both are missing, leave both fields empty and let the user re-enter.
 
-Return ONLY this JSON:
-{{
-  "TripType": "one_way | round_trip | multi_city",
-  "source": "",
-  "destination": "",
-  "date": "",  <-- for one_way only "Enter as-is (e.g., 'tomorrow', '2 days later', '12 July',) — DO NOT convert to YYYY-MM-DD here"
-  "departure_date": "",  <-- for round_trip
-  "return_date": "",     <-- for round_trip
-  "flights": [],         <-- for multi_city
-  "TravelClass": "",
-  "Travelers": [],
-  "airline_detected": ""
-}}
+    9. If one or more specific airlines are mentioned,correct their spellings and detect them using correct mapping from {AIRLINE_NAMES}. Populate "airline_detected" as a list of valid airline names. Example:
+   "airline_detected": ["PIA", "Emirates"]
 
-Query:
-\"\"\"{query}\"\"\"
-"""
+10. If no specific airline is mentioned, set "airline_detected": []
+
+    Return ONLY this JSON:
+    {{
+      "TripType": "one_way | round_trip | multi_city",
+      "source": "",
+      "destination": "",
+      "date": "", 
+      "departure_date": "",
+      "return_date": "",
+      "flights": [],
+      "TravelClass": "",
+      "Travelers": [],
+      "airline_detected": []
+    }}
+
+    Query:
+    \"\"\"{query}\"\"\"
+    """
 
     response = genai.GenerativeModel("models/gemini-1.5-flash-latest").generate_content(prompt)
     text = re.sub(r"^```json|```$", "", response.text, flags=re.MULTILINE).strip()
 
     try:
         data = json.loads(text)
+        # Normalize airline_detected to a list
+        airline = data.get("airline_detected")
+
+        # Case 1: Single airline as string → wrap into list
+        if isinstance(airline, str):
+            airline = [airline]
+        # Case 2: Already a list → okay
+        elif not isinstance(airline, list):
+            airline = []
+
+        # Validate and clean
+        data["airline_detected"] = validate_airlines(airline)
 
         if "message" in data:
             return json.dumps(data)
 
         trip_type = data.get("TripType", "").lower()
 
-        # Common defaults
         data["TravelClass"] = data.get("TravelClass") or DEFAULTS["TravelClass"]
         data["Travelers"] = data.get("Travelers") or DEFAULTS["Travelers"]
 
@@ -97,12 +136,23 @@ Query:
                 {"Type": "infant", "Count": traveler_counts["infant"]},
             ]
 
-        ###  ONE-WAY FLIGHT
+        ### ONE-WAY
         if trip_type == "one_way":
             if not data.get("date"):
-                data["date"] = today_str()
-            else:
-                data["date"] = resolve_date(data["date"])
+                return json.dumps({
+                    "message": "You did not provide a travel date. Please re-enter your request with the date.",
+                    "partial_data": {
+                        "source": data.get("source", ""),
+                        "destination": data.get("destination", ""),
+                        "TripType": "one_way",
+                        "TravelClass": data["TravelClass"],
+                        "Travelers": data["Travelers"],
+                        **({"airline_detected": data["airline_detected"]} if data["airline_detected"] else {})
+
+                    }
+                })
+
+            data["date"] = resolve_date(data["date"])
             return json.dumps({
                 "source": data.get("source", ""),
                 "destination": data.get("destination", ""),
@@ -114,79 +164,87 @@ Query:
                 **({"airline_detected": data["airline_detected"]} if data.get("airline_detected") else {})
             })
 
-
-
-
-        ###  ROUND TRIP
+        ### ROUND TRIP
         elif trip_type == "round_trip":
-            # Get dates directly without fallback to 'date'
-            departure = data.get("departure_date")
-            return_date = data.get("return_date")
+            departure = resolve_date(data.get("departure_date", "")) if data.get("departure_date") else ""
+            return_date = resolve_date(data.get("return_date", "")) if data.get("return_date") else ""
 
-            # Handle missing dates
             if not departure and not return_date:
-                departure = return_date = today_str()
+                return json.dumps({
+                    "message": "You did not provide any travel dates. Please provide both departure and return dates.",
+                    "partial_data": {
+                        "source": data.get("source", ""),
+                        "destination": data.get("destination", ""),
+                        "TripType": "round_trip",
+                        "TravelClass": data["TravelClass"],
+                        "Travelers": data["Travelers"],
+                        **({"airline_detected": data["airline_detected"]} if data["airline_detected"] else {})
+
+                    }
+                })
             elif departure and not return_date:
                 return_date = departure
             elif not departure and return_date:
-                departure = return_date
-
-            # Resolve both dates
-            resolved_departure = resolve_date(departure)
-            resolved_return = resolve_date(return_date)
+                return json.dumps({
+                    "message": "You did not provide a departure date. Please provide it.",
+                    "partial_data": {
+                        "source": data.get("source", ""),
+                        "destination": data.get("destination", ""),
+                        "return_date": return_date,
+                        "TripType": "round_trip",
+                        "TravelClass": data["TravelClass"],
+                        "Travelers": data["Travelers"],
+                        **({"airline_detected": data["airline_detected"]} if data["airline_detected"] else {})
+                    }
+                })
 
             return json.dumps({
-                "source": data.get("source", ""),  # Keep original city name
-                "destination": data.get("destination", ""),  # Keep original city name
-                "departure_date": resolved_departure,
-                "return_date": resolved_return,
+                "source": data.get("source", ""),
+                "destination": data.get("destination", ""),
+                "departure_date": resolve_date(departure),
+                "return_date": resolve_date(return_date),
                 "time": "",
                 "TripType": "return",
                 "TravelClass": data["TravelClass"],
                 "Travelers": data["Travelers"],
-                **({"airline_detected": data["airline_detected"]} if data.get("airline_detected") else {})
+                **({"airline_detected": data["airline_detected"]} if data["airline_detected"] else {})
             })
 
-
-
-
-
-
-        ### ✅ MULTI CITY
+        ###  MULTI CITY
         elif trip_type == "multi_city":
             flights = data.get("flights", [])
-
-            # Normalize and resolve dates
             normalized_flights = []
+            has_missing_data = False
+
             for leg in flights:
                 src = leg.get("source", "").strip()
                 dst = leg.get("destination", "").strip()
-                if not src or not dst:
-                    continue
-                if not city_to_iata(src) or not city_to_iata(dst):
-                    continue  # Skip invalid cities
+                date_raw = leg.get("date", "").strip()
+                date = resolve_date(date_raw)  # Resolve date before checking
 
-                date = resolve_date(leg.get("date", today_str()))
+                if not src or not dst or not date:
+                    has_missing_data = True
+                    break
+                if not city_to_iata(src) or not city_to_iata(dst):
+                    continue
+
                 normalized_flights.append({
                     "source": src,
                     "destination": dst,
                     "date": date
                 })
 
-            if len(normalized_flights) < 2:
-                # Fallback to one_way
-                fallback = normalized_flights[0] if normalized_flights else {}
+            if has_missing_data or len(normalized_flights) < 2:
                 return json.dumps({
-                    "TripType": "one_way",
-                    "source": fallback.get("source", ""),
-                    "destination": fallback.get("destination", ""),
-                    "date": fallback.get("date", today_str()),
-                    "TravelClass": data["TravelClass"],
-                    "Travelers": data["Travelers"],
-                    **({"airline_detected": data["airline_detected"]} if data.get("airline_detected") else {})
+                    "message": "Some flight legs are missing date, source, or destination. Please provide complete multi-city details.",
+                    "partial_data": {
+                        "TripType": "multi_city",
+                        "TravelClass": data["TravelClass"],
+                        "Travelers": data["Travelers"],
+                        **({"airline_detected": data["airline_detected"]} if data["airline_detected"] else {})
+                    }
                 })
 
-            # Build locations array (alternating source/destination)
             locations = []
             dates = []
             for leg in normalized_flights:
@@ -200,10 +258,12 @@ Query:
                 "TravelingDates": dates,
                 "TravelClass": data["TravelClass"],
                 "Travelers": data["Travelers"],
-                **({"airline_detected": data["airline_detected"]} if data.get("airline_detected") else {})
+                **({"airline_detected": data["airline_detected"]} if data["airline_detected"] else {})
             })
-        # Fallback if unknown trip type
+
         return json.dumps({"error": "Unknown or unsupported TripType."})
 
     except Exception as e:
         return json.dumps({"error": f"Could not parse flight details. {str(e)}"})
+
+
