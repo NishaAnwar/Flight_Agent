@@ -39,19 +39,17 @@ CITY_TO_IATA = {
 }
 
 AIRLINE_NAMES = {
-    "PIA": "pia",
     "Air Sial": "airsial",
+    "pia": "amadeus",
+    "amadeus":"amadeus",
     "Airblue": "airblue",
     "Air Blue": "airblue",
-    "Serene Air": "serene",
-    "Fly Jinnah": "flyjinnah",
-    "Amadeus" :"amadeus"
+    "Serene Air": "sereneair",
+    "Fly Jinnah": "oneapi",
+    "Fly-jinnah":"oneapi",
+    "oneapi":"oneapi"
+
 }
-
-
-
-
-
 def get_airline_code(user_input: str) -> str:
     if not user_input:
         return ""
@@ -62,7 +60,7 @@ def get_airline_code(user_input: str) -> str:
     name_map = {k.lower(): v for k, v in AIRLINE_NAMES.items()}
 
     # Get closest match
-    match = get_close_matches(normalized_input, name_map.keys(), n=1, cutoff=0.6)
+    match = get_close_matches(normalized_input, name_map.keys(), n=1, cutoff=0.9)
     if match:
         return name_map[match[0]]  # Return the provider code
     return ""  # Return empty if no match found
